@@ -19,16 +19,16 @@ use serde::{
     de::{value::StringDeserializer, IntoDeserializer},
     Deserialize,
 };
-use std::{collections::BTreeMap, sync::{Arc, Mutex}};
+use std::{collections::BTreeMap, sync::{Arc, RwLock}};
 use wasm_bindgen::{prelude::*, JsCast};
 
-type Subscriptions = Arc<Mutex<BTreeMap<SubscriptionId, mpsc::UnboundedSender<serde_json::Value>>>>;
+type Subscriptions = Arc<RwLock<BTreeMap<SubscriptionId, mpsc::UnboundedSender<serde_json::Value>>>>;
 
 
 /// EIP-1193 transport
 #[derive(Clone, Debug)]
 pub struct Eip1193 {
-    provider_and_listeners: Arc<Mutex<ProviderAndListeners>>,
+    provider_and_listeners: Arc<RwLock<ProviderAndListeners>>,
     subscriptions: Subscriptions,
 }
 
@@ -46,7 +46,7 @@ impl Eip1193 {
             log::trace!("Message from provider: {:?}", evt);
             match evt.event_type.as_str() {
                 "eth_subscription" => {
-                    let subscriptions_map = subscriptions_for_closure.lock().unwrap();
+                    let subscriptions_map = subscriptions_for_closure.read().unwrap();
                     match subscriptions_map.get(&SubscriptionId::from(evt.data.subscription.clone())) {
                         Some(sink) => {
                             if let Err(err) = sink.unbounded_send(evt.data.result) {
@@ -61,7 +61,7 @@ impl Eip1193 {
         }) as Box<dyn FnMut(JsValue)>);
         provider_and_listeners.on("message", msg_handler);
         Eip1193 {
-            provider_and_listeners: Arc::new(Mutex::new(provider_and_listeners)),
+            provider_and_listeners: Arc::new(RwLock::new(provider_and_listeners)),
             subscriptions,
         }
     }
@@ -113,7 +113,7 @@ impl Eip1193 {
         T: 'static,
     {
         let (sender, receiver) = mpsc::unbounded();
-        self.provider_and_listeners.lock().unwrap().on(
+        self.provider_and_listeners.write().unwrap().on(
             name,
             Closure::wrap(Box::new(move |evt| {
                 let evt_parsed = handler(evt);
@@ -181,7 +181,7 @@ impl Transport for Eip1193 {
             }) => {
                 let js_params =
                     js_sys::Array::from(&JsValue::from_serde(&params).expect("couldn't send method params via JSON"));
-                let copy = self.provider_and_listeners.lock().unwrap().provider.clone();
+                let copy = self.provider_and_listeners.read().unwrap().provider.clone();
                 Box::pin(async move {
                     copy.request_wrapped(RequestArguments {
                         method,
@@ -200,13 +200,13 @@ impl DuplexTransport for Eip1193 {
 
     fn subscribe(&self, id: SubscriptionId) -> error::Result<Self::NotificationStream> {
         let (sender, receiver) = mpsc::unbounded();
-        let mut subscriptions_ref = self.subscriptions.lock().unwrap();
+        let mut subscriptions_ref = self.subscriptions.write().unwrap();
         subscriptions_ref.insert(id, sender);
         Ok(receiver)
     }
 
     fn unsubscribe(&self, id: SubscriptionId) -> error::Result<()> {
-        match (*self.subscriptions.lock().unwrap()).remove(&id) {
+        match (*self.subscriptions.write().unwrap()).remove(&id) {
             Some(_sender) => Ok(()),
             None => panic!("Tried to unsubscribe from non-existent subscription. Did we already unsubscribe?"),
         }
